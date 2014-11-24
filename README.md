@@ -8,11 +8,11 @@ http://search.cpan.org/~mlehmann/AnyEvent-FastPing-2.01/
 
 It hasn't been fully implemented original functions yet. There are interface changes coming so you must be ready to deal with that.
 
-[![GoDoc](https://godoc.org/github.com/tatsushid/go-fastping?status.svg)](https://godoc.org/github.com/tatsushid/go-fastping)
+[![GoDoc](https://godoc.org/github.com/wdreeveii/go-fastping?status.svg)](https://godoc.org/github.com/wdreeveii/go-fastping)
 
 ## Installation
 
-Install and update this go package with `go get -u github.com/tatsushid/go-fastping`
+Install and update this go package with `go get -u github.com/wdreeveii/go-fastping`
 
 ## Examples
 
@@ -46,5 +46,5 @@ please see "cmd/ping/ping.go".
 ## License
 go-fastping is under MIT License. See the [LICENSE][license] file for details.
 
-[godoc]: http://godoc.org/github.com/tatsushid/go-fastping
-[license]: https://github.com/tatsushid/go-fastping/blob/master/LICENSE
+[godoc]: http://godoc.org/github.com/wdreeveii/go-fastping
+[license]: https://github.com/wdreeveii/go-fastping/blob/master/LICENSE
