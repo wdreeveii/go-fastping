@@ -311,10 +311,10 @@ func (p *Pinger) run(once bool, debug bool) {
 	}
 	defer conn.Close()
 
-	/*if conn6 = p.listen("ip6:ipv6-icmp"); conn6 == nil {
+	if conn6 = p.listen("ip6:ipv6-icmp"); conn6 == nil {
 		return
 	}
-	defer conn6.Close()*/
+	defer conn6.Close()
 
 	recvCtx := newContext()
 	wg := new(sync.WaitGroup)

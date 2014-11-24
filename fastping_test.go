@@ -1,6 +1,7 @@
 package fastping
 
 import (
+	"encoding/binary"
 	"net"
 	"sync"
 	"testing"
@@ -154,7 +155,7 @@ func TestMultiRun(t *testing.T) {
 			ch <- err
 		}
 	}(errch2)
-	ticker := time.NewTicker(time.Millisecond * 200)
+	ticker := time.NewTicker(time.Millisecond * 250)
 	select {
 	case err := <-errch1:
 		t.Fatalf("Pinger 1 returns error: %v", err)
@@ -165,11 +166,11 @@ func TestMultiRun(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if res1 != 1 {
-		t.Fatalf("Pinger 1 didn't get correct response")
+	if res1 != 2 {
+		t.Fatalf("Pinger 1 didn't get correct response: %v", res1, res2)
 	}
-	if res2 != 1 {
-		t.Fatalf("Pinger 2 didn't get correct response")
+	if res2 != 2 {
+		t.Fatalf("Pinger 2 didn't get correct response: %v", res1, res2)
 	}
 }
 
@@ -192,7 +193,7 @@ func TestRunLoop(t *testing.T) {
 
 	var err error
 	p.RunLoop()
-	ticker := time.NewTicker(time.Millisecond * 250)
+	ticker := time.NewTicker(time.Millisecond * 300)
 	select {
 	case <-p.Done():
 		if err = p.Err(); err != nil {
@@ -213,14 +214,13 @@ func TestRunLoop(t *testing.T) {
 }
 
 func TestTimeToBytes(t *testing.T) {
-	// 2009-11-10 23:00:00 +0000 UTC = 1257894000000000000
-	expect := []byte{0x11, 0x74, 0xef, 0xed, 0xab, 0x18, 0x60, 0x00}
-	tm, err := time.Parse(time.RFC3339, "2009-11-10T23:00:00Z")
-	if err != nil {
-		t.Errorf("time.Parse failed: %v", err)
-	}
-	b := timeToBytes(tm)
-	for i := 0; i < 8; i++ {
+	test_time := time.Now()
+	nsec := test_time.UnixNano()
+	expect := make([]byte, binary.MaxVarintLen64)
+	binary.PutVarint(expect, nsec)
+	b := timeToBytes(test_time)
+
+	for i := 0; i < binary.MaxVarintLen64; i++ {
 		if b[i] != expect[i] {
 			t.Errorf("timeToBytes failed: got %v, expected: %v", b, expect)
 			break
@@ -229,12 +229,10 @@ func TestTimeToBytes(t *testing.T) {
 }
 
 func TestBytesToTime(t *testing.T) {
-	// 2009-11-10 23:00:00 +0000 UTC = 1257894000000000000
-	b := []byte{0x11, 0x74, 0xef, 0xed, 0xab, 0x18, 0x60, 0x00}
-	expect, err := time.Parse(time.RFC3339, "2009-11-10T23:00:00Z")
-	if err != nil {
-		t.Errorf("time.Parse failed: %v", err)
-	}
+	expect := time.Now()
+	nsec := expect.UnixNano()
+	b := make([]byte, binary.MaxVarintLen64)
+	binary.PutVarint(b, nsec)
 	tm := bytesToTime(b)
 	if !tm.Equal(expect) {
 		t.Errorf("bytesToTime failed: got %v, expected: %v", tm.UTC(), expect.UTC())
@@ -255,10 +253,10 @@ func TestTimeToBytesToTime(t *testing.T) {
 
 func TestPayloadSizeDefault(t *testing.T) {
 	s := timeToBytes(time.Now())
-	d := append(s, byteSliceOfSize(8-TimeSliceLength)...)
+	d := append(s, byteSliceOfSize(TimeSliceLength-TimeSliceLength)...)
 
-	if len(d) != 8 {
-		t.Errorf("Payload size incorrect: got %d, expected: %d", len(d), 8)
+	if len(d) != TimeSliceLength {
+		t.Errorf("Payload size incorrect: got %d, expected: %d", len(d), TimeSliceLength)
 	}
 }
 
