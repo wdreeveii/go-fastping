@@ -473,6 +473,7 @@ func (p *Pinger) sendICMP(conn, conn6 *net.IPConn, debug bool) error {
 		}(cn, addr, typ, debug)
 	}
 	wg.Wait()
+	ticker.Stop()
 	if debug {
 		log.Println("sendICMP(): End")
 	}
