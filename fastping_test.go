@@ -82,8 +82,8 @@ func TestRun(t *testing.T) {
 	if !found1 {
 		t.Fatalf("Pinger `127.0.0.1` didn't respond")
 	}
-	if found100 {
-		t.Fatalf("Pinger `127.0.0.100` responded")
+	if !found100 {
+		t.Fatalf("Pinger `127.0.0.100` didn't respond")
 	}
 	if !foundv6 {
 		t.Fatalf("Pinger `::1` didn't responded")

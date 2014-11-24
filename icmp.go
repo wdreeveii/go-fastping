@@ -37,14 +37,17 @@ package fastping
 
 import (
 	"errors"
+	//"fmt"
 )
 
 func ipv4Payload(b []byte) []byte {
-	if len(b) < 20 {
+	/*if len(b) < 20 {
 		return b
 	}
 	hdrlen := int(b[0]&0x0f) << 2
 	return b[hdrlen:]
+	*/
+	return b
 }
 
 const (
@@ -103,6 +106,7 @@ func (m *icmpMessage) Marshal() ([]byte, error) {
 // parseICMPMessage parses b as an ICMP message.
 func parseICMPMessage(b []byte) (*icmpMessage, error) {
 	msglen := len(b)
+	//fmt.Println("parse icmp:", msglen, b[:60])
 	if msglen < 4 {
 		return nil, errors.New("message too short")
 	}
@@ -141,6 +145,7 @@ func (p *icmpEcho) Marshal() ([]byte, error) {
 	b := make([]byte, 4+len(p.Data))
 	b[0], b[1] = byte(p.ID>>8), byte(p.ID)
 	b[2], b[3] = byte(p.Seq>>8), byte(p.Seq)
+	//fmt.Printf("enc: %x %x %x %x\n", b[0], b[1], b[2], b[3])
 	copy(b[4:], p.Data)
 	return b, nil
 }
@@ -148,6 +153,7 @@ func (p *icmpEcho) Marshal() ([]byte, error) {
 // parseICMPEcho parses b as an ICMP echo request or reply message
 // body.
 func parseICMPEcho(b []byte) (*icmpEcho, error) {
+	//fmt.Printf("parse: %x %x %x %x\n", b[0], b[1], b[2], b[3])
 	bodylen := len(b)
 	p := &icmpEcho{ID: int(b[0])<<8 | int(b[1]), Seq: int(b[2])<<8 | int(b[3])}
 	if bodylen > 4 {

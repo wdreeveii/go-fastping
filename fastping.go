@@ -37,6 +37,7 @@
 package fastping
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -47,7 +48,7 @@ import (
 	"time"
 )
 
-const TimeSliceLength = 8
+const TimeSliceLength = binary.MaxVarintLen64
 
 func byteSliceOfSize(n int) []byte {
 	b := make([]byte, n)
@@ -60,19 +61,15 @@ func byteSliceOfSize(n int) []byte {
 
 func timeToBytes(t time.Time) []byte {
 	nsec := t.UnixNano()
-	b := make([]byte, 8)
-	for i := uint8(0); i < 8; i++ {
-		b[i] = byte((nsec >> ((7 - i) * 8)) & 0xff)
-	}
+	b := make([]byte, binary.MaxVarintLen64)
+	binary.PutVarint(b, nsec)
 	return b
 }
 
 func bytesToTime(b []byte) time.Time {
 	var nsec int64
-	for i := uint8(0); i < 8; i++ {
-		nsec += int64(b[i]) << ((7 - i) * 8)
-	}
-	return time.Unix(nsec/1000000000, nsec%1000000000)
+	nsec, _ = binary.Varint(b)
+	return time.Unix(nsec/int64(time.Second), nsec%int64(time.Second))
 }
 
 func isIPv4(ip net.IP) bool {
@@ -84,8 +81,8 @@ func isIPv6(ip net.IP) bool {
 }
 
 type packet struct {
-	bytes []byte
-	addr  *net.IPAddr
+	msg  *icmpMessage
+	addr *net.IPAddr
 }
 
 type context struct {
@@ -106,11 +103,9 @@ type Pinger struct {
 	id  int
 	seq int
 	// key string is IPAddr.String()
-	addrs   map[string]*net.IPAddr
-	hasIPv4 bool
-	hasIPv6 bool
-	ctx     *context
-	mu      sync.Mutex
+	addrs map[string]*net.IPAddr
+	ctx   *context
+	mu    sync.Mutex
 
 	// Size in bytes of the payload to send
 	Size int
@@ -131,48 +126,47 @@ type Pinger struct {
 func NewPinger() *Pinger {
 	rand.Seed(time.Now().UnixNano())
 	return &Pinger{
-		id:      rand.Intn(0xffff),
-		seq:     rand.Intn(0xffff),
-		addrs:   make(map[string]*net.IPAddr),
-		hasIPv4: false,
-		hasIPv6: false,
-		Size:    TimeSliceLength,
-		MaxRTT:  time.Second,
-		OnRecv:  nil,
-		OnIdle:  nil,
-		Debug:   false,
+		id:     rand.Intn(0xffff),
+		seq:    rand.Intn(0xffff),
+		addrs:  make(map[string]*net.IPAddr),
+		Size:   TimeSliceLength,
+		MaxRTT: time.Second,
+		OnRecv: nil,
+		OnIdle: nil,
+		Debug:  false,
 	}
 }
 
 // AddIP adds an IP address to Pinger. ipaddr arg should be a string like
 // "192.0.2.1".
 func (p *Pinger) AddIP(ipaddr string) error {
+
 	addr := net.ParseIP(ipaddr)
 	if addr == nil {
 		return fmt.Errorf("%s is not a valid textual representation of an IP address", ipaddr)
 	}
 	p.mu.Lock()
+	debug := p.Debug
 	p.addrs[addr.String()] = &net.IPAddr{IP: addr}
-	if isIPv4(addr) {
-		p.hasIPv4 = true
-	} else if isIPv6(addr) {
-		p.hasIPv6 = true
-	}
 	p.mu.Unlock()
+	if debug {
+		log.Println("AddIP(): " + ipaddr)
+	}
 	return nil
 }
 
 // AddIPAddr adds an IP address to Pinger. ip arg should be a net.IPAddr
 // pointer.
 func (p *Pinger) AddIPAddr(ip *net.IPAddr) {
+
 	p.mu.Lock()
+	debug := p.Debug
 	p.addrs[ip.String()] = ip
-	if isIPv4(ip.IP) {
-		p.hasIPv4 = true
-	} else if isIPv6(ip.IP) {
-		p.hasIPv6 = true
-	}
 	p.mu.Unlock()
+
+	if debug {
+		log.Println("AddIPAddr: " + ip.String())
+	}
 }
 
 // AddHandler adds event handler to Pinger. event arg should be "receive" or
@@ -226,7 +220,7 @@ func (p *Pinger) Run() error {
 	p.mu.Lock()
 	p.ctx = newContext()
 	p.mu.Unlock()
-	p.run(true)
+	p.run(true, p.Debug)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.ctx.err
@@ -259,7 +253,7 @@ func (p *Pinger) RunLoop() {
 	p.mu.Lock()
 	p.ctx = newContext()
 	p.mu.Unlock()
-	go p.run(false)
+	go p.run(false, p.Debug)
 }
 
 // Done returns a channel that is closed when RunLoop() is stopped by an error
@@ -271,9 +265,15 @@ func (p *Pinger) Done() <-chan bool {
 // Stop stops RunLoop(). It must be called after RunLoop(). If not, it causes
 // panic.
 func (p *Pinger) Stop() {
-	p.debugln("Stop(): close(p.ctx.stop)")
+	p.mu.Lock()
+	if p.Debug {
+		log.Println("Stop(): close(p.ctx.stop)")
+	}
 	close(p.ctx.stop)
-	p.debugln("Stop(): <-p.ctx.done")
+	if p.Debug {
+		log.Println("Stop(): <-p.ctx.done")
+	}
+	p.mu.Unlock()
 	<-p.ctx.done
 }
 
@@ -290,105 +290,131 @@ func (p *Pinger) listen(netProto string) *net.IPConn {
 	if err != nil {
 		p.mu.Lock()
 		p.ctx.err = err
+		debug := p.Debug
 		p.mu.Unlock()
-		p.debugln("Run(): close(p.ctx.done)")
+		if debug {
+			log.Println("Run(): close(p.ctx.done)")
+		}
 		close(p.ctx.done)
 		return nil
 	}
 	return conn
 }
 
-func (p *Pinger) run(once bool) {
-	p.debugln("Run(): Start")
+func (p *Pinger) run(once bool, debug bool) {
+	if debug {
+		log.Println("Run(): Start")
+	}
 	var conn, conn6 *net.IPConn
-	if p.hasIPv4 {
-		if conn = p.listen("ip4:icmp"); conn == nil {
-			return
-		}
-		defer conn.Close()
+	if conn = p.listen("ip4:icmp"); conn == nil {
+		return
 	}
+	defer conn.Close()
 
-	if p.hasIPv6 {
-		if conn6 = p.listen("ip6:ipv6-icmp"); conn6 == nil {
-			return
-		}
-		defer conn6.Close()
+	/*if conn6 = p.listen("ip6:ipv6-icmp"); conn6 == nil {
+		return
 	}
+	defer conn6.Close()*/
 
-	recv := make(chan *packet)
 	recvCtx := newContext()
 	wg := new(sync.WaitGroup)
 
-	p.debugln("Run(): call recvICMP()")
+	if debug {
+		log.Println("Run(): call recvICMP()")
+	}
+
+	if debug {
+		log.Println("Run(): call sendICMP()")
+	}
+	var err error
+	err = p.sendICMP(conn, conn6, debug)
+
+	p.mu.Lock()
+	idle_handler := p.OnIdle
+	recv_handler := p.OnRecv
+	ticker := time.NewTicker(p.MaxRTT)
+	p.mu.Unlock()
 	if conn != nil {
 		wg.Add(1)
-		go p.recvICMP(conn, recv, recvCtx, wg)
+		go p.recvICMP(conn, recv_handler, recvCtx, wg, debug)
 	}
 	if conn6 != nil {
 		wg.Add(1)
-		go p.recvICMP(conn6, recv, recvCtx, wg)
+		go p.recvICMP(conn6, recv_handler, recvCtx, wg, debug)
 	}
-
-	p.debugln("Run(): call sendICMP()")
-	queue, err := p.sendICMP(conn, conn6)
-
-	ticker := time.NewTicker(p.MaxRTT)
 
 mainloop:
 	for {
 		select {
 		case <-p.ctx.stop:
-			p.debugln("Run(): <-p.ctx.stop")
+			if debug {
+				log.Println("Run(): <-p.ctx.stop")
+			}
 			break mainloop
 		case <-recvCtx.done:
-			p.debugln("Run(): <-recvCtx.done")
+			if debug {
+				log.Println("Run(): <-recvCtx.done")
+			}
 			p.mu.Lock()
 			err = recvCtx.err
 			p.mu.Unlock()
 			break mainloop
 		case <-ticker.C:
-			p.mu.Lock()
-			handler := p.OnIdle
-			p.mu.Unlock()
-			if handler != nil {
-				handler()
+			if idle_handler != nil {
+				idle_handler()
 			}
 			if once || err != nil {
 				break mainloop
 			}
-			p.debugln("Run(): call sendICMP()")
-			queue, err = p.sendICMP(conn, conn6)
-		case r := <-recv:
-			p.debugln("Run(): <-recv")
-			p.procRecv(r, queue)
+			if debug {
+				log.Println("Run(): call sendICMP()")
+			}
+			err = p.sendICMP(conn, conn6, debug)
 		}
 	}
 
 	ticker.Stop()
-
-	p.debugln("Run(): close(recvCtx.stop)")
+	if debug {
+		log.Println("Run(): close(recvCtx.stop)")
+	}
 	close(recvCtx.stop)
-	p.debugln("Run(): wait recvICMP()")
+	if debug {
+		log.Println("Run(): wait recvICMP()")
+	}
 	wg.Wait()
 
 	p.mu.Lock()
 	p.ctx.err = err
 	p.mu.Unlock()
 
-	p.debugln("Run(): close(p.ctx.done)")
+	if debug {
+		log.Println("Run(): close(p.ctx.done)")
+	}
 	close(p.ctx.done)
-	p.debugln("Run(): End")
+	if debug {
+		log.Println("Run(): End")
+	}
 }
 
-func (p *Pinger) sendICMP(conn, conn6 *net.IPConn) (map[string]*net.IPAddr, error) {
-	p.debugln("sendICMP(): Start")
+func (p *Pinger) sendICMP(conn, conn6 *net.IPConn, debug bool) error {
+	id := rand.Intn(0xffff)
+	seq := rand.Intn(0xffff)
+
+	local_addrs := make(map[string]*net.IPAddr)
+
+	if debug {
+		log.Println("sendICMP(): Start")
+	}
 	p.mu.Lock()
-	p.id = rand.Intn(0xffff)
-	p.seq = rand.Intn(0xffff)
+	p.id = id
+	p.seq = seq
+	for k, v := range p.addrs {
+		local_addrs[k] = v
+	}
 	p.mu.Unlock()
-	queue := make(map[string]*net.IPAddr)
+	ticker := time.NewTicker(time.Millisecond * 50)
 	wg := new(sync.WaitGroup)
-	for key, addr := range p.addrs {
+	for _, addr := range local_addrs {
 		var typ int
 		var cn *net.IPConn
 		if isIPv4(addr.IP) {
@@ -404,153 +430,125 @@ func (p *Pinger) sendICMP(conn, conn6 *net.IPConn) (map[string]*net.IPAddr, erro
 			continue
 		}
 
-		t := timeToBytes(time.Now())
-
-		if p.Size-TimeSliceLength != 0 {
-			t = append(t, byteSliceOfSize(p.Size-TimeSliceLength)...)
+		if debug {
+			log.Println("sendICMP(): Invoke goroutine")
 		}
-
-		p.mu.Lock()
-		bytes, err := (&icmpMessage{
-			Type: typ, Code: 0,
-			Body: &icmpEcho{
-				ID: p.id, Seq: p.seq,
-				Data: t,
-			},
-		}).Marshal()
-		p.mu.Unlock()
-		if err != nil {
-			wg.Wait()
-			return queue, err
-		}
-
-		queue[key] = addr
-
-		p.debugln("sendICMP(): Invoke goroutine")
 		wg.Add(1)
-		go func(conn *net.IPConn, ra *net.IPAddr, b []byte) {
+		// rate limit packet sending to avoid overwhelming the network
+		<-ticker.C
+		go func(conn *net.IPConn, ra *net.IPAddr, pkt_typ int, debug bool) {
+			t := timeToBytes(time.Now())
+
+			if p.Size-TimeSliceLength != 0 {
+				t = append(t, byteSliceOfSize(p.Size-TimeSliceLength)...)
+			}
+
+			bytes, err := (&icmpMessage{
+				Type: pkt_typ, Code: 0,
+				Body: &icmpEcho{
+					ID: id, Seq: seq,
+					Data: t,
+				},
+			}).Marshal()
+
+			if err != nil {
+				log.Println(err)
+				return
+			}
 			for {
-				if _, _, err := conn.WriteMsgIP(bytes, nil, ra); err != nil {
+				if _, err := conn.WriteToIP(bytes, ra); err != nil {
 					if neterr, ok := err.(*net.OpError); ok {
 						if neterr.Err == syscall.ENOBUFS {
+							log.Println("ENOBUFS")
 							continue
 						}
 					}
 				}
 				break
 			}
-			p.debugln("sendICMP(): WriteMsgIP End")
+			if debug {
+				log.Println("sendICMP(): WriteMsgIP End")
+			}
 			wg.Done()
-		}(cn, addr, bytes)
+		}(cn, addr, typ, debug)
 	}
 	wg.Wait()
-	p.debugln("sendICMP(): End")
-	return queue, nil
+	if debug {
+		log.Println("sendICMP(): End")
+	}
+	return nil
 }
 
-func (p *Pinger) recvICMP(conn *net.IPConn, recv chan<- *packet, ctx *context, wg *sync.WaitGroup) {
-	p.debugln("recvICMP(): Start")
+func (p *Pinger) recvICMP(conn *net.IPConn, recv_handler func(*net.IPAddr, time.Duration), ctx *context, wg *sync.WaitGroup, debug bool) {
+	if debug {
+		log.Println("recvICMP(): Start")
+	}
 	for {
 		select {
 		case <-ctx.stop:
-			p.debugln("recvICMP(): <-ctx.stop")
+			if debug {
+				log.Println("recvICMP(): <-ctx.stop")
+			}
 			wg.Done()
-			p.debugln("recvICMP(): wg.Done()")
+			if debug {
+				log.Println("recvICMP(): wg.Done()")
+			}
 			return
 		default:
 		}
 
 		bytes := make([]byte, 512)
 		conn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
-		p.debugln("recvICMP(): ReadMsgIP Start")
-		_, _, _, ra, err := conn.ReadMsgIP(bytes, nil)
-		p.debugln("recvICMP(): ReadMsgIP End")
+		if debug {
+			log.Println("recvICMP(): ReadMsgIP Start")
+		}
+		n, ra, err := conn.ReadFromIP(bytes)
+		if debug {
+			log.Println("recvICMP(): ReadMsgIP End")
+		}
 		if err != nil {
 			if neterr, ok := err.(*net.OpError); ok {
 				if neterr.Timeout() {
-					p.debugln("recvICMP(): Read Timeout")
 					continue
 				} else {
-					p.debugln("recvICMP(): OpError happen", err)
+					log.Println("recv Error", err)
 					p.mu.Lock()
 					ctx.err = err
 					p.mu.Unlock()
-					p.debugln("recvICMP(): close(ctx.done)")
 					close(ctx.done)
-					p.debugln("recvICMP(): wg.Done()")
 					wg.Done()
 					return
 				}
 			}
 		}
-		p.debugln("recvICMP(): p.recv <- packet")
-		recv <- &packet{bytes: bytes, addr: ra}
+		if debug {
+			log.Println("recvICMP(): recv packet")
+		}
+		var m *icmpMessage
+		if m, err = parseICMPMessage(bytes[:n]); err != nil {
+			continue
+		}
+		if m.Type != icmpv4EchoReply && m.Type != icmpv6EchoReply {
+			continue
+		}
+		if debug {
+			log.Println("recvICMP(): recv reply")
+		}
+		go p.procRecv(&packet{msg: m, addr: ra}, recv_handler)
 	}
 }
 
-func (p *Pinger) procRecv(recv *packet, queue map[string]*net.IPAddr) {
-	addr := recv.addr.String()
-	p.mu.Lock()
-	if _, ok := p.addrs[addr]; !ok {
-		p.mu.Unlock()
-		return
-	}
-	p.mu.Unlock()
-
-	var bytes []byte
-	if isIPv4(recv.addr.IP) {
-		bytes = ipv4Payload(recv.bytes)
-	} else if isIPv6(recv.addr.IP) {
-		bytes = recv.bytes
-	} else {
-		return
-	}
-
-	var m *icmpMessage
-	var err error
-	if m, err = parseICMPMessage(bytes); err != nil {
-		return
-	}
-
-	if m.Type != icmpv4EchoReply && m.Type != icmpv6EchoReply {
-		return
-	}
-
+func (p *Pinger) procRecv(recv *packet, recv_handler func(*net.IPAddr, time.Duration)) {
 	var rtt time.Duration
-	switch pkt := m.Body.(type) {
+	switch pkt := recv.msg.Body.(type) {
 	case *icmpEcho:
-		p.mu.Lock()
-		if pkt.ID == p.id && pkt.Seq == p.seq {
-			rtt = time.Since(bytesToTime(pkt.Data[:TimeSliceLength]))
-		}
-		p.mu.Unlock()
+		time_from_packet := bytesToTime(pkt.Data[:TimeSliceLength])
+		rtt = time.Since(time_from_packet)
 	default:
 		return
 	}
 
-	if _, ok := queue[addr]; ok {
-		delete(queue, addr)
-		p.mu.Lock()
-		handler := p.OnRecv
-		p.mu.Unlock()
-		if handler != nil {
-			handler(recv.addr, rtt)
-		}
-	}
-}
-
-func (p *Pinger) debugln(args ...interface{}) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.Debug {
-		log.Println(args...)
-	}
-}
-
-func (p *Pinger) debugf(format string, args ...interface{}) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.Debug {
-		log.Printf(format, args...)
+	if recv_handler != nil {
+		recv_handler(recv.addr, rtt)
 	}
 }
