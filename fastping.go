@@ -320,10 +320,6 @@ func (p *Pinger) run(once bool, debug bool) {
 	wg := new(sync.WaitGroup)
 
 	if debug {
-		log.Println("Run(): call recvICMP()")
-	}
-
-	if debug {
 		log.Println("Run(): call sendICMP()")
 	}
 	var err error
@@ -332,8 +328,11 @@ func (p *Pinger) run(once bool, debug bool) {
 	p.mu.Lock()
 	idle_handler := p.OnIdle
 	recv_handler := p.OnRecv
-	ticker := time.NewTicker(p.MaxRTT)
 	p.mu.Unlock()
+
+	if debug {
+		log.Println("Run(): call recvICMP()")
+	}
 	if conn != nil {
 		wg.Add(1)
 		go p.recvICMP(conn, recv_handler, recvCtx, wg, debug)
@@ -343,6 +342,9 @@ func (p *Pinger) run(once bool, debug bool) {
 		go p.recvICMP(conn6, recv_handler, recvCtx, wg, debug)
 	}
 
+	p.mu.Lock()
+	ticker := time.NewTicker(p.MaxRTT)
+	p.mu.Unlock()
 mainloop:
 	for {
 		select {
