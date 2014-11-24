@@ -414,7 +414,7 @@ func (p *Pinger) sendICMP(conn, conn6 *net.IPConn, debug bool) error {
 		local_addrs[k] = v
 	}
 	p.mu.Unlock()
-	ticker := time.NewTicker(time.Millisecond * 50)
+	ticker := time.NewTicker(time.Millisecond * 100)
 	wg := new(sync.WaitGroup)
 	for _, addr := range local_addrs {
 		var typ int
